@@ -1,0 +1,61 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "DeepSight",
+  "version": "2.0.0",
+  "identifier": "com.deepsight.yolo",
+  "build": {
+    "frontendDist": "../src",
+    "beforeDevCommand": "",
+    "beforeBuildCommand": ""
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "DeepSight - Teachable YOLO V2",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 1024,
+        "minHeight": 680,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true,
+        "center": true,
+        "transparent": false,
+        "dragDropEnabled": true
+      }
+    ],
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**"]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": [
+      "../python-core/*",
+      "../python-core/models/*"
+    ],
+    "externalBin": [],
+    "category": "Education",
+    "shortDescription": "Teachable YOLO - Aprendizaje de Vision Artificial",
+    "longDescription": "Herramienta educativa offline para entrenar modelos YOLO de clasificacion de imagenes en equipos de bajos recursos.",
+    "copyright": "DeepSight v2.0",
+    "windows": {
+      "wix": {
+        "language": "es-ES"
+      }
+    }
+  }
+}

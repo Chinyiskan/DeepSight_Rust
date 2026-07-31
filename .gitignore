@@ -1,0 +1,110 @@
+# ==============================================================================
+# DEEPSIGHT V2 - CONFIGURACIÓN DE .GITIGNORE PARA OPEN SOURCE (GITHUB)
+# Multi-stack: Node.js (pnpm), Rust (Tauri v2), Python (Ultralytics YOLO / PyTorch)
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Node.js & Administradores de Paquetes (pnpm / npm / yarn)
+# ------------------------------------------------------------------------------
+node_modules/
+.pnpm-store/
+.npm/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ------------------------------------------------------------------------------
+# 2. Compilación Backend Nativo de Rust & Tauri v2
+# ------------------------------------------------------------------------------
+src-tauri/target/
+src-tauri/gen/
+**/*.rs.bk
+
+# ------------------------------------------------------------------------------
+# 3. Python, Entornos Virtuales y Caché
+# ------------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ------------------------------------------------------------------------------
+# 4. Modelos YOLO, Datasets Temporales y Result de Entrenamientos Locales
+# ------------------------------------------------------------------------------
+# Directorios temporales de staging de imágenes generados durante entrenamientos
+temp_dataset/
+dry_run_probe/
+synthetic_probe/
+
+# Resultados de entrenamientos de Ultralytics YOLO
+runs/
+
+# Archivos de pesos (.pt) locales y exportaciones
+*.pt
+*.onnx
+*.engine
+*.tflite
+
+# Excepción: mantener los modelos base empaquetados en python-core/models/
+!python-core/models/*.pt
+
+# ------------------------------------------------------------------------------
+# 5. Variables de Entorno, Claves y Secretos
+# ------------------------------------------------------------------------------
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+*.pem
+*.key
+*.crt
+
+# ------------------------------------------------------------------------------
+# 6. Configuración de IDEs, Edición y Herramientas de Depuración
+# ------------------------------------------------------------------------------
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.swp
+*.swo
+.dbg/
+.trae/
+debug-app-stuck-loading.md
+
+# ------------------------------------------------------------------------------
+# 7. Archivos del Sistema Operativo (Windows, macOS, Linux)
+# ------------------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini

@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DeepSight - Entrenador Visual Inteligente</title>
+  <style>
+    @font-face {
+      font-family: 'InterLocal';
+      font-style: normal;
+      font-weight: 400 700;
+      font-display: swap;
+      src: local('Inter'), local('Inter-Regular'), local('Segoe UI'), local('Helvetica Neue'), local('Arial');
+    }
+    @font-face {
+      font-family: 'JetBrainsMonoLocal';
+      font-style: normal;
+      font-weight: 400 600;
+      font-display: swap;
+      src: local('JetBrains Mono'), local('JetBrainsMono-Regular'), local('Consolas'), local('Monaco'), local('Courier New');
+    }
+  </style>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="theme-dark">
+
+  <div id="splash-screen" class="splash-screen">
+    <div class="splash-content">
+      <div class="splash-logo">
+        <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#3574f0" stroke-width="2">
+          <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+          <line x1="8" y1="21" x2="16" y2="21"></line>
+          <line x1="12" y1="17" x2="12" y2="21"></line>
+        </svg>
+        <div class="splash-title">DeepSight <span class="splash-ver">v2.0</span></div>
+      </div>
+      <div class="splash-msg">Estamos configurando DeepSight para maximo rendimiento en tu equipo</div>
+      <div class="splash-submsg">Detectando aceleradores (GPU/CPU) y optimizando motor offline...</div>
+      <div class="splash-progress-bg">
+        <div id="splash-progress-bar" class="splash-progress-bar"></div>
+      </div>
+      <div id="splash-status" class="splash-status">Iniciando...</div>
+    </div>
+  </div>
+
+  <div id="training-overlay" class="training-overlay hidden">
+    <div class="training-modal">
+      <div class="training-modal-header">
+        <div class="training-spinner"></div>
+        <div class="training-modal-title">ENTRENAMIENTO EN PROGRESO</div>
+      </div>
+      <div class="training-modal-body">
+        <div class="epoch-progress-section">
+          <div class="epoch-row">
+            <span class="epoch-label">Epoca:</span>
+            <span id="overlay-epoch-text" class="epoch-value">0 / 0</span>
+          </div>
+          <div class="epoch-bar-bg">
+            <div id="overlay-epoch-bar" class="epoch-bar-fill" style="width: 0%"></div>
+          </div>
+        </div>
+        <div id="overlay-tip-container" class="tip-container">
+          <div class="tip-label">DATO CURIOSO</div>
+          <div id="overlay-tip-text" class="tip-text">Cargando consejos...</div>
+        </div>
+        <div class="training-log-section">
+          <div class="training-log-header">SALIDA EN TIEMPO REAL</div>
+          <div id="overlay-terminal" class="training-log-body"></div>
+        </div>
+      </div>
+      <div class="training-modal-footer">
+        <div class="training-modal-note">No cierres la aplicacion durante el entrenamiento.</div>
+      </div>
+    </div>
+  </div>
+
+  <header class="ide-toolbar">
+    <div class="toolbar-brand">
+      <svg class="brand-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+        <line x1="8" y1="21" x2="16" y2="21"></line>
+        <line x1="12" y1="17" x2="12" y2="21"></line>
+      </svg>
+      <span class="brand-name">DeepSight</span>
+      <span class="brand-version">v2.0</span>
+    </div>
+
+    <div class="toolbar-center">
+      <div id="hw-badge" class="hw-badge">
+        <span class="status-indicator"></span>
+        <span id="hw-info-text">Detectando hardware...</span>
+      </div>
+    </div>
+
+    <div class="toolbar-actions">
+      <label class="theme-switch" id="btn-theme-toggle" title="Cambiar entre Darcula y Light UI">
+        <span class="theme-switch__icon" aria-hidden="true">🌙</span>
+        <input type="checkbox" class="theme-switch__input" id="theme-toggle-checkbox" aria-label="Cambiar tema de la aplicacion">
+        <span class="theme-switch__slider"></span>
+        <span class="theme-switch__icon" aria-hidden="true">☀️</span>
+      </label>
+    </div>
+  </header>
+
+  <div id="admin-warning-banner" class="admin-banner hidden">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+      <line x1="12" y1="9" x2="12" y2="13"></line>
+      <line x1="12" y1="17" x2="12.01" y2="17"></line>
+    </svg>
+    <span>Modo Administrador Detectado: Por seguridad de Windows (UIPI), el Arrastrar y Soltar esta inhabilitado. Ejecuta la app sin Administrador para arrastrar imagenes.</span>
+  </div>
+
+  <main class="ide-workspace">
+
+    <section class="ide-panel">
+      <div class="panel-header">
+        <span class="panel-number">01</span>
+        <h2 class="panel-title">Definicion de Clases</h2>
+      </div>
+
+      <div id="classes-container" class="classes-scroll-area">
+      </div>
+
+      <div class="panel-footer">
+        <button id="btn-add-class" class="ide-btn-secondary full-width">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="12" y1="5" x2="12" y2="19"></line>
+            <line x1="5" y1="12" x2="19" y2="12"></line>
+          </svg>
+          <span>Anadir Clase</span>
+        </button>
+      </div>
+    </section>
+
+    <section class="ide-panel">
+      <div class="panel-header">
+        <span class="panel-number">02</span>
+        <h2 class="panel-title">Entrenamiento</h2>
+      </div>
+
+      <div class="panel-body">
+        <button id="btn-train" class="ide-btn-primary full-width">
+          <svg class="play-icon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+            <polygon points="5 3 19 12 5 21 5 3"></polygon>
+          </svg>
+          <span>Ejecutar Entrenamiento</span>
+        </button>
+
+        <div id="train-mode-badge" class="info-badge">
+          <span class="badge-dot"></span>
+          <span id="train-mode-text">Listo para entrenar</span>
+        </div>
+
+        <div class="tip-card">
+          <span class="tip-title">MODO DE ENTRENAMIENTO</span>
+          <p class="tip-body">Al cargar 30+ imagenes por clase se activa el motor de alta precision. Con menos de 30 imagenes se activa el modo rapido con data augmentation agresiva.</p>
+        </div>
+
+        <div class="terminal-container">
+          <div class="terminal-header">
+            <span class="terminal-title">TERMINAL - SALIDA DE ENTRENAMIENTO</span>
+            <button id="btn-clear-log" class="terminal-action-btn" title="Limpiar Consola">Limpiar</button>
+          </div>
+          <div id="terminal-output" class="terminal-body">
+            <div class="log-line info">[SYS] Sistema iniciado. Define tus clases y agrega imagenes para comenzar.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="ide-panel">
+      <div class="panel-header">
+        <span class="panel-number">03</span>
+        <h2 class="panel-title">Prueba e Inferencia</h2>
+      </div>
+
+      <div class="panel-body">
+        <div id="test-dropzone" class="dropzone test-dropzone">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+            <circle cx="8.5" cy="8.5" r="1.5"></circle>
+            <polyline points="21 15 16 10 5 21"></polyline>
+          </svg>
+          <div class="dropzone-text">Arrastra una imagen de prueba aqui</div>
+          <div class="dropzone-subtext">o haz clic para explorar</div>
+        </div>
+
+        <div id="test-file-badge" class="test-file-badge hidden">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+            <circle cx="8.5" cy="8.5" r="1.5"></circle>
+            <polyline points="21 15 16 10 5 21"></polyline>
+          </svg>
+          <span id="test-file-name" class="test-file-name">imagen.jpg</span>
+        </div>
+
+        <div id="test-thumbnail-wrap" class="test-thumbnail-wrap hidden">
+          <img id="test-thumbnail" class="test-thumbnail" alt="Vista previa de imagen de prueba">
+        </div>
+
+        <div class="result-card">
+          <div class="result-row">
+            <span class="result-label">Prediccion:</span>
+            <span id="res-class-name" class="result-value">---</span>
+          </div>
+          <div class="result-row">
+            <span class="result-label">Confianza:</span>
+            <span id="res-confidence-text" class="result-value">---</span>
+          </div>
+          <div class="confidence-bar-bg">
+            <div id="confidence-bar-fill" class="confidence-bar-fill" style="width: 0%;"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel-footer">
+        <button id="btn-export" class="ide-btn-success full-width" disabled>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
+            <polyline points="17 21 17 13 7 13 7 21"></polyline>
+            <polyline points="7 3 7 8 15 8"></polyline>
+          </svg>
+          <span>Exportar modelo (best.pt)</span>
+        </button>
+      </div>
+    </section>
+
+  </main>
+
+  <script>
+    (function () {
+      if (typeof window.__TAURI__ !== 'object') {
+        window.__TAURI__ = {};
+      }
+      if (
+        !window.__TAURI__.core &&
+        typeof window.__TAURI_INTERNALS__ === 'object' &&
+        typeof window.__TAURI_INTERNALS__.invoke === 'function'
+      ) {
+        window.__TAURI__.core = {
+          invoke: function (cmd, args, options) {
+            return window.__TAURI_INTERNALS__.invoke(cmd, args || {}, options);
+          }
+        };
+      }
+      document.documentElement.dataset.tauriBridge =
+        window.__TAURI__ &&
+        window.__TAURI__.core &&
+        typeof window.__TAURI__.core.invoke === 'function'
+          ? 'ready'
+          : 'pending';
+    })();
+  </script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
