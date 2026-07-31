@@ -510,9 +510,11 @@ fn main() {
                     if let Some(pid) = *pid_guard {
                         #[cfg(windows)]
                         {
+                            use std::os::windows::process::CommandExt;
                             // En Windows usamos taskkill para matar el árbol de procesos completo
                             let _ = std::process::Command::new("taskkill")
                                 .args(["/F", "/T", "/PID", &pid.to_string()])
+                                .creation_flags(0x08000000) // CREATE_NO_WINDOW
                                 .output();
                         }
                         #[cfg(not(windows))]

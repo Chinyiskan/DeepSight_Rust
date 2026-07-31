@@ -73,7 +73,14 @@ fn check_python() -> (bool, String) {
     };
 
     for cmd in &candidates {
-        if let Ok(output) = Command::new(cmd).arg("--version").output() {
+        let mut command = Command::new(cmd);
+        command.arg("--version");
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+        if let Ok(output) = command.output() {
             if output.status.success() {
                 let stdout_ver = String::from_utf8_lossy(&output.stdout)
                     .trim()

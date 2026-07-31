@@ -67,7 +67,14 @@ pub fn find_python_interpreter() -> Result<String> {
     };
 
     for cmd in &candidates {
-        if let Ok(output) = Command::new(cmd).arg("--version").output() {
+        let mut command = Command::new(cmd);
+        command.arg("--version");
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+        if let Ok(output) = command.output() {
             if output.status.success() {
                 return Ok(cmd.clone());
             }
@@ -392,14 +399,21 @@ pub async fn run_training(
         raw: format!("[RUN] {} train.py", python_cmd),
     });
 
-    let mut child = TokioCommand::new(&python_cmd)
-        .arg(&train_script)
+    let mut cmd = TokioCommand::new(&python_cmd);
+    cmd.arg(&train_script)
         .arg(temp_dataset.to_string_lossy().to_string())
         .arg(project_root.to_string_lossy().to_string())
         .arg(&classes_arg)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+
+    let mut child = cmd
         .spawn()
         .with_context(|| "No se pudo iniciar proceso Python")?;
 
@@ -585,14 +599,21 @@ pub async fn run_inference(
 
     let classes_arg = join_class_names_for_arg(&class_names);
 
-    let child = TokioCommand::new(&python_cmd)
-        .arg(&infer_script)
+    let mut cmd = TokioCommand::new(&python_cmd);
+    cmd.arg(&infer_script)
         .arg(model_path.to_string_lossy().to_string())
         .arg(image_path.to_string_lossy().to_string())
         .arg(&classes_arg)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+
+    let child = cmd
         .spawn()
         .with_context(|| "No se pudo iniciar inferencia Python")?;
 
