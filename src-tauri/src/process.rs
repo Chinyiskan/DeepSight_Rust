@@ -1,16 +1,16 @@
 use anyhow::{Context, Result};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock, Mutex};
 use tauri::{AppHandle, Manager};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as TokioCommand;
 use tokio::sync::mpsc;
-use uuid::Uuid;
 use unicode_normalization::UnicodeNormalization;
-use regex::Regex;
+use uuid::Uuid;
 
 const CLASS_SEPARATOR: &str = "\x1f";
 static RE_ACCENTS: LazyLock<Regex> =
@@ -45,9 +45,7 @@ pub struct InferenceResult {
     pub error_message: Option<String>,
 }
 
-pub const VALID_IMAGE_EXT: &[&str] = &[
-    "jpg", "jpeg", "png", "bmp", "webp", "tif", "tiff",
-];
+pub const VALID_IMAGE_EXT: &[&str] = &["jpg", "jpeg", "png", "bmp", "webp", "tif", "tiff"];
 
 pub fn is_valid_image_extension(path: &str) -> bool {
     Path::new(path)
@@ -59,7 +57,11 @@ pub fn is_valid_image_extension(path: &str) -> bool {
 
 pub fn find_python_interpreter() -> Result<String> {
     let candidates = if cfg!(windows) {
-        vec!["python".to_string(), "python3".to_string(), "py".to_string()]
+        vec![
+            "python".to_string(),
+            "python3".to_string(),
+            "py".to_string(),
+        ]
     } else {
         vec!["python3".to_string(), "python".to_string()]
     };
@@ -239,9 +241,7 @@ fn prepare_temp_dataset_sync(
     let temp_id = Uuid::new_v4().simple().to_string();
     // Usar la carpeta temporal del SO en lugar de project_root para evitar errores
     // de permisos cuando la app está instalada en C:\Program Files (x86) (bug producción).
-    let temp_root = std::env::temp_dir()
-        .join("DeepSight")
-        .join(&temp_id);
+    let temp_root = std::env::temp_dir().join("DeepSight").join(&temp_id);
     std::fs::create_dir_all(&temp_root)
         .with_context(|| format!("No se pudo crear carpeta temporal: {}", temp_root.display()))?;
 
@@ -266,8 +266,9 @@ fn prepare_temp_dataset_sync(
             safe_class_name.clone()
         };
         let class_dir = temp_root.join(&class_dir_name);
-        std::fs::create_dir_all(&class_dir)
-            .with_context(|| format!("No se pudo crear carpeta de clase: {}", class_dir.display()))?;
+        std::fs::create_dir_all(&class_dir).with_context(|| {
+            format!("No se pudo crear carpeta de clase: {}", class_dir.display())
+        })?;
         class_dir_order.push(class_name.clone());
 
         for (file_idx, src_path_str) in file_paths.iter().enumerate() {
@@ -312,7 +313,11 @@ fn prepare_temp_dataset_sync(
 
             if src_path.is_file() {
                 std::fs::copy(src_path, &dest_path).with_context(|| {
-                    format!("Error copiando: {} -> {}", src_path.display(), dest_path.display())
+                    format!(
+                        "Error copiando: {} -> {}",
+                        src_path.display(),
+                        dest_path.display()
+                    )
                 })?;
             }
         }
@@ -329,7 +334,10 @@ fn prepare_temp_dataset_sync(
                     temp_root.display()
                 )
             }),
-            raw: format!("[OK] Dataset temporal listo ({} clases)", class_dir_order.len()),
+            raw: format!(
+                "[OK] Dataset temporal listo ({} clases)",
+                class_dir_order.len()
+            ),
         });
     }
 
@@ -411,7 +419,6 @@ pub async fn run_training(
         raw: format!("[PID] {} iniciado", child_id),
     });
 
-
     let stdout = child
         .stdout
         .take()
@@ -424,11 +431,25 @@ pub async fn run_training(
     let tx_stdout = tx.clone();
     let tx_stderr = tx.clone();
 
+    // Captura compartida: el task de stdout guarda best_pt_path cuando
+    // llega el evento JSON "complete" del proceso Python.
+    // Esto evita depender de project_root (que puede ser C:\Program Files, de solo lectura).
+    let captured_best_pt: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let captured_best_pt_writer = Arc::clone(&captured_best_pt);
+
     let stdout_task = tokio::spawn(async move {
         let reader = BufReader::new(stdout);
         let mut lines = reader.lines();
         while let Ok(Some(line)) = lines.next_line().await {
             let output = parse_python_line(&line);
+            // Capturar best_pt_path desde el evento "complete" antes de enviarlo al canal.
+            if output.line_type == "complete" {
+                if let Some(path) = output.content.get("best_pt_path").and_then(|v| v.as_str()) {
+                    if let Ok(mut g) = captured_best_pt_writer.lock() {
+                        *g = Some(path.to_string());
+                    }
+                }
+            }
             let _ = tx_stdout.send(output);
         }
     });
@@ -484,17 +505,49 @@ pub async fn run_training(
         raw: format!("[END] Codigo {:?}", status.code()),
     });
 
-    let best_pt = project_root.join("best.pt");
-    if status.success() && best_pt.exists() {
-        Ok(TrainingResult {
-            success: true,
-            best_pt_path: Some(best_pt.to_string_lossy().to_string()),
-            class_names,
-            error_message: None,
-            hyperparameters: None,
-            metrics: None,
-        })
-    } else if !status.success() {
+    // La ruta de best.pt viene del mensaje JSON "complete" del proceso Python.
+    // Python la guarda en %TEMP%\DeepSight\train_<id>\best.pt, que siempre
+    // tiene permisos de escritura (evita PermissionError en Program Files).
+    let best_pt_from_python = captured_best_pt.lock().ok().and_then(|g| g.clone());
+
+    if status.success() {
+        if let Some(path) = best_pt_from_python {
+            let best_pt = PathBuf::from(&path);
+            if best_pt.exists() {
+                Ok(TrainingResult {
+                    success: true,
+                    best_pt_path: Some(path),
+                    class_names,
+                    error_message: None,
+                    hyperparameters: None,
+                    metrics: None,
+                })
+            } else {
+                Ok(TrainingResult {
+                    success: false,
+                    best_pt_path: None,
+                    class_names,
+                    error_message: Some(format!(
+                        "Entrenamiento completado pero best.pt no se encontro en: {}",
+                        path
+                    )),
+                    hyperparameters: None,
+                    metrics: None,
+                })
+            }
+        } else {
+            Ok(TrainingResult {
+                success: false,
+                best_pt_path: None,
+                class_names,
+                error_message: Some(
+                    "Entrenamiento termino pero no se recibio la ruta de best.pt".to_string(),
+                ),
+                hyperparameters: None,
+                metrics: None,
+            })
+        }
+    } else {
         Ok(TrainingResult {
             success: false,
             best_pt_path: None,
@@ -503,17 +556,6 @@ pub async fn run_training(
                 "El proceso Python devolvio codigo de error: {:?}",
                 status.code()
             )),
-            hyperparameters: None,
-            metrics: None,
-        })
-    } else {
-        Ok(TrainingResult {
-            success: false,
-            best_pt_path: None,
-            class_names,
-            error_message: Some(
-                "Entrenamiento termino pero no se genero best.pt".to_string(),
-            ),
             hyperparameters: None,
             metrics: None,
         })
@@ -554,9 +596,10 @@ pub async fn run_inference(
         .spawn()
         .with_context(|| "No se pudo iniciar inferencia Python")?;
 
-    let output = child.wait_with_output().await.with_context(|| {
-        "No se pudo obtener salida de la inferencia Python"
-    })?;
+    let output = child
+        .wait_with_output()
+        .await
+        .with_context(|| "No se pudo obtener salida de la inferencia Python")?;
 
     let stderr_str = String::from_utf8_lossy(&output.stderr).to_string();
 
@@ -632,9 +675,7 @@ pub async fn run_inference(
             confidence: None,
             class_index: None,
             top_predictions: None,
-            error_message: Some(
-                "No se pudo parsear la salida de inferencia".to_string(),
-            ),
+            error_message: Some("No se pudo parsear la salida de inferencia".to_string()),
         })
     }
 }
@@ -672,7 +713,11 @@ fn parse_python_line(line: &str) -> ProcessOutput {
 pub fn cleanup_temp_files(project_root: &Path, temp_dataset: &Path) {
     if temp_dataset.exists() {
         if let Err(e) = std::fs::remove_dir_all(temp_dataset) {
-            eprintln!("[cleanup] No se pudo borrar {}: {}", temp_dataset.display(), e);
+            eprintln!(
+                "[cleanup] No se pudo borrar {}: {}",
+                temp_dataset.display(),
+                e
+            );
         }
     }
 
@@ -703,7 +748,11 @@ pub fn cleanup_temp_files(project_root: &Path, temp_dataset: &Path) {
     let runs_dir = project_root.join("train_output");
     if runs_dir.exists() {
         if let Err(e) = std::fs::remove_dir_all(&runs_dir) {
-            eprintln!("[cleanup] No se pudo borrar runs {}: {}", runs_dir.display(), e);
+            eprintln!(
+                "[cleanup] No se pudo borrar runs {}: {}",
+                runs_dir.display(),
+                e
+            );
         }
     }
 

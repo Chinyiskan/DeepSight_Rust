@@ -3,6 +3,8 @@ import os
 import sys
 import shutil
 import re
+import tempfile
+import uuid
 from pathlib import Path
 
 os.environ["YOLO_OFFLINE"] = "1"
@@ -261,14 +263,24 @@ def main():
             sys.exit(1)
 
         dataset_path = sys.argv[1]
-        project_root = sys.argv[2]
+        project_root = sys.argv[2]  # Solo para logging; NO se usa como destino de escritura.
 
         class_names = []
         if len(sys.argv) >= 4 and sys.argv[3].strip():
             class_names = [c.strip() for c in sys.argv[3].split(CLASS_SEPARATOR) if c.strip()]
 
+        # ── Directorio de salida con permisos garantizados ──────────────────────
+        # En produccion, project_root apunta a C:\Program Files (x86)\DeepSight,
+        # que es de solo lectura para usuarios sin privilegios. Usamos siempre
+        # la carpeta temporal del SO (%TEMP%\DeepSight\train_<uuid>) para que
+        # YOLO pueda crear train_output y guardar los pesos sin PermissionError.
+        run_id = str(uuid.uuid4().hex[:12])
+        safe_output_dir = Path(tempfile.gettempdir()) / "DeepSight" / f"train_{run_id}"
+        safe_output_dir.mkdir(parents=True, exist_ok=True)
+
         print_log(f"Dataset path: {dataset_path}", "info")
-        print_log(f"Project root: {project_root}", "info")
+        print_log(f"Project root (referencia): {project_root}", "info")
+        print_log(f"Output dir seguro: {safe_output_dir}", "info")
 
         dataset_dir = Path(dataset_path)
         if not dataset_dir.exists():
@@ -333,8 +345,10 @@ def main():
         model = YOLO(str(model_path))
         print_log("Modelo base cargado en memoria", "info")
 
-        runs_output_dir = Path(project_root)
-        runs_output_dir.mkdir(parents=True, exist_ok=True)
+        # YOLO escribe sus artefactos en safe_output_dir/train_output/
+        # Esta ruta siempre tiene permisos de escritura independientemente
+        # de donde este instalada la aplicacion.
+        runs_output_dir = safe_output_dir
 
         results = model.train(
             data=str(prepared_dataset_path),
@@ -365,7 +379,10 @@ def main():
             if alt.exists():
                 best_pt_source = alt
 
-        final_output_path = Path(project_root) / "best.pt"
+        # El modelo final se guarda dentro del mismo directorio temporal seguro.
+        # Rust lee la ruta exacta desde el campo "best_pt_path" del JSON "complete"
+        # y desde ahi lo copia/mueve a donde necesite (AppData, etc.).
+        final_output_path = safe_output_dir / "best.pt"
 
         if best_pt_source.exists():
             shutil.copy2(str(best_pt_source), str(final_output_path))
