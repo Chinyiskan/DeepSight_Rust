@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::LazyLock;
+use tauri::{AppHandle, Manager};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as TokioCommand;
 use tokio::sync::mpsc;
@@ -76,6 +77,61 @@ pub fn find_python_interpreter() -> Result<String> {
     ))
 }
 
+/// Resuelve la carpeta `python-core` usando la API de recursos de Tauri v2.
+///
+/// Orden de búsqueda:
+///   1. `resource_dir()` de Tauri → correcto en el bundle de producción
+///      (`C:\Program Files (x86)\DeepSight\resources\python-core\`)
+///   2. Fallback de desarrollo: sube desde el exe/cwd buscando `python-core/train.py`
+///      (útil con `pnpm tauri dev` donde los recursos no están copiados aún).
+pub fn resolve_python_core_dir_with_app(app: &AppHandle) -> PathBuf {
+    // ── 1. Fuente primaria: resource_dir de Tauri ──────────────────────────────
+    if let Ok(res_dir) = app.path().resource_dir() {
+        let candidate = res_dir.join("python-core");
+        if candidate.join("train.py").exists() {
+            return std::fs::canonicalize(&candidate).unwrap_or(candidate);
+        }
+        // Algunos empaquetadores aplanan resources/ directamente
+        if res_dir.join("train.py").exists() {
+            return std::fs::canonicalize(&res_dir).unwrap_or(res_dir);
+        }
+    }
+
+    // ── 2. Fallback de desarrollo: subir desde exe o cwd ──────────────────────
+    let mut seen = HashSet::new();
+    let mut starts: Vec<PathBuf> = Vec::new();
+
+    if let Ok(cwd) = std::env::current_dir() {
+        starts.push(cwd);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            starts.push(dir.to_path_buf());
+        }
+    }
+
+    for start in starts {
+        for ancestor in start.ancestors() {
+            let buf = ancestor.to_path_buf();
+            if !seen.insert(buf.clone()) {
+                continue;
+            }
+            let candidate = buf.join("python-core");
+            if candidate.join("train.py").exists() {
+                return std::fs::canonicalize(&candidate).unwrap_or(candidate);
+            }
+        }
+    }
+
+    // ── 3. Último recurso: junto al ejecutable ────────────────────────────────
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("python-core")))
+        .unwrap_or_else(|| PathBuf::from("python-core"))
+}
+
+/// Mantiene compatibilidad con código que no tiene AppHandle disponible.
+/// Usar `resolve_python_core_dir_with_app` siempre que sea posible.
 #[allow(dead_code)]
 pub fn resolve_project_root() -> Result<PathBuf> {
     let mut seen = HashSet::new();
@@ -108,6 +164,7 @@ pub fn resolve_project_root() -> Result<PathBuf> {
     Ok(std::fs::canonicalize(&fallback).unwrap_or(fallback))
 }
 
+#[allow(dead_code)]
 pub fn resolve_python_core_dir(project_root: &Path) -> PathBuf {
     let candidates = vec![
         project_root.join("python-core"),
@@ -293,6 +350,7 @@ pub async fn prepare_temp_dataset(
 }
 
 pub async fn run_training(
+    app: AppHandle,
     project_root: PathBuf,
     temp_dataset: PathBuf,
     class_names: Vec<String>,
@@ -302,13 +360,16 @@ pub async fn run_training(
     pid_tx: Option<tokio::sync::oneshot::Sender<u32>>,
 ) -> Result<TrainingResult> {
     let python_cmd = find_python_interpreter()?;
-    let python_core = resolve_python_core_dir(&project_root);
+    // Usar la API de Tauri v2 para resolver recursos correctamente tanto en dev
+    // como en el bundle de producción instalado en Program Files.
+    let python_core = resolve_python_core_dir_with_app(&app);
     let train_script = python_core.join("train.py");
 
     if !train_script.exists() {
         return Err(anyhow::anyhow!(
-            "Script train.py no encontrado: {}",
-            train_script.display()
+            "Script train.py no encontrado: {}\n[resource_dir={:?}]",
+            train_script.display(),
+            app.path().resource_dir().ok()
         ));
     }
 
@@ -460,19 +521,23 @@ pub async fn run_training(
 }
 
 pub async fn run_inference(
-    project_root: PathBuf,
+    app: AppHandle,
+    _project_root: PathBuf,
     model_path: PathBuf,
     image_path: PathBuf,
     class_names: Vec<String>,
 ) -> Result<InferenceResult> {
     let python_cmd = find_python_interpreter()?;
-    let python_core = resolve_python_core_dir(&project_root);
+    // Usar la API de Tauri v2 para resolver recursos correctamente tanto en dev
+    // como en el bundle de producción instalado en Program Files.
+    let python_core = resolve_python_core_dir_with_app(&app);
     let infer_script = python_core.join("infer.py");
 
     if !infer_script.exists() {
         return Err(anyhow::anyhow!(
-            "Script infer.py no encontrado: {}",
-            infer_script.display()
+            "Script infer.py no encontrado: {}\n[resource_dir={:?}]",
+            infer_script.display(),
+            app.path().resource_dir().ok()
         ));
     }
 

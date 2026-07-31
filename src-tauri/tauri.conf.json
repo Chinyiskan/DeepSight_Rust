@@ -43,10 +43,9 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": [
-      "../python-core/*",
-      "../python-core/models/*"
-    ],
+    "resources": {
+      "../python-core": "python-core"
+    },
     "externalBin": [],
     "category": "Education",
     "shortDescription": "Teachable YOLO - Aprendizaje de Vision Artificial",

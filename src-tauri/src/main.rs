@@ -11,8 +11,9 @@ use tokio::sync::mpsc;
 
 use crate::process::{
     cleanup_legacy_temp_at_startup, cleanup_temp_files, find_python_interpreter,
-    is_valid_image_extension, prepare_temp_dataset, resolve_project_root, run_inference,
-    run_training, sanitize_filename, InferenceResult, ProcessOutput, TrainingResult,
+    is_valid_image_extension, prepare_temp_dataset, resolve_project_root,
+    resolve_python_core_dir_with_app, run_inference, run_training, sanitize_filename,
+    InferenceResult, ProcessOutput, TrainingResult,
 };
 use crate::system_info::SystemInfo;
 
@@ -241,6 +242,7 @@ async fn start_training(
 
 
         let training_result = run_training(
+            app_clone.clone(),
             project_root_clone.clone(),
             temp_dir.clone(),
             class_names_clone.clone(),
@@ -402,6 +404,7 @@ async fn start_training(
 
 #[tauri::command]
 async fn run_test_inference(
+    app: AppHandle,
     state: State<'_, AppState>,
     image_path: String,
 ) -> Result<InferenceResult, String> {
@@ -453,14 +456,15 @@ async fn run_test_inference(
         return Err("No hay nombres de clases guardados. Re-entrena el modelo.".to_string());
     }
 
-    let project_root = resolve_project_root().map_err(|e| {
-        format!(
-            "No se pudo resolver la raiz del proyecto para inferencia: {}",
-            e
-        )
-    })?;
+    let project_root = resolve_python_core_dir_with_app(&app)
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| {
+            resolve_project_root()
+                .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        });
 
-    run_inference(project_root, model_pb, image_pb, class_names)
+    run_inference(app, project_root, model_pb, image_pb, class_names)
         .await
         .map_err(|e| e.to_string())
 }
