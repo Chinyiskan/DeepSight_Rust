@@ -175,12 +175,16 @@ pub fn join_class_names_for_arg(class_names: &[String]) -> String {
 }
 
 fn prepare_temp_dataset_sync(
-    project_root: &Path,
+    _project_root: &Path,
     classes: &[(String, Vec<String>)],
     tx: Option<&mpsc::UnboundedSender<ProcessOutput>>,
 ) -> Result<(PathBuf, Vec<String>)> {
     let temp_id = Uuid::new_v4().simple().to_string();
-    let temp_root = project_root.join("temp_dataset").join(&temp_id);
+    // Usar la carpeta temporal del SO en lugar de project_root para evitar errores
+    // de permisos cuando la app está instalada en C:\Program Files (x86) (bug producción).
+    let temp_root = std::env::temp_dir()
+        .join("DeepSight")
+        .join(&temp_id);
     std::fs::create_dir_all(&temp_root)
         .with_context(|| format!("No se pudo crear carpeta temporal: {}", temp_root.display()))?;
 
@@ -607,9 +611,10 @@ pub fn cleanup_temp_files(project_root: &Path, temp_dataset: &Path) {
         }
     }
 
-    let temp_root = project_root.join("temp_dataset");
-    if temp_root.exists() {
-        match std::fs::read_dir(&temp_root) {
+    // Barrido secundario: limpiar cualquier sesión de DeepSight huérfana en temp del SO.
+    let sys_temp_root = std::env::temp_dir().join("DeepSight");
+    if sys_temp_root.exists() {
+        match std::fs::read_dir(&sys_temp_root) {
             Ok(entries) => {
                 for entry in entries.flatten() {
                     let path = entry.path();
@@ -617,22 +622,13 @@ pub fn cleanup_temp_files(project_root: &Path, temp_dataset: &Path) {
                         if let Err(e) = std::fs::remove_dir_all(&path) {
                             eprintln!("[cleanup] No se pudo borrar dir {}: {}", path.display(), e);
                         }
-                    } else if path
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .map(|s| s.eq_ignore_ascii_case("yaml"))
-                        .unwrap_or(false)
-                    {
-                        if let Err(e) = std::fs::remove_file(&path) {
-                            eprintln!("[cleanup] No se pudo borrar yaml {}: {}", path.display(), e);
-                        }
                     }
                 }
             }
             Err(e) => {
                 eprintln!(
-                    "[cleanup] No se pudo leer temp_dataset {}: {}",
-                    temp_root.display(),
+                    "[cleanup] No se pudo leer DeepSight temp {}: {}",
+                    sys_temp_root.display(),
                     e
                 );
             }
@@ -667,9 +663,10 @@ pub fn cleanup_temp_files(project_root: &Path, temp_dataset: &Path) {
 }
 
 pub fn cleanup_legacy_temp_at_startup(project_root: &Path) {
-    let temp_root = project_root.join("temp_dataset");
-    if temp_root.exists() {
-        match std::fs::read_dir(&temp_root) {
+    // Limpiar sesiones huérfanas de DeepSight en la carpeta temporal del SO.
+    let sys_temp_root = std::env::temp_dir().join("DeepSight");
+    if sys_temp_root.exists() {
+        match std::fs::read_dir(&sys_temp_root) {
             Ok(entries) => {
                 for entry in entries.flatten() {
                     let path = entry.path();
@@ -684,6 +681,7 @@ pub fn cleanup_legacy_temp_at_startup(project_root: &Path) {
         }
     }
 
+    // Limpiar carpetas de runs/train_output heredadas junto al binario.
     if let Ok(entries) = std::fs::read_dir(project_root) {
         for entry in entries.flatten() {
             let path = entry.path();
