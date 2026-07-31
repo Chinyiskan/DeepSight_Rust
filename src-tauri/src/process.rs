@@ -124,14 +124,44 @@ pub fn resolve_python_core_dir(project_root: &Path) -> PathBuf {
 }
 
 pub fn sanitize_filename(name: &str) -> String {
-    let nfkd: String = name.nfkd().collect();
+    // SEGURIDAD: Extraer solo el componente basename para prevenir Path Traversal.
+    // Un nombre como "../../passwd" queda reducido a "passwd" antes de sanitizar.
+    let basename = Path::new(name)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(name);
+
+    // Eliminar separadores de directorio que puedan sobrevivir (Windows '\', Unix '/')
+    let no_separators: String = basename
+        .chars()
+        .filter(|&c| c != '/' && c != '\\')
+        .collect();
+
+    // Normalización Unicode y eliminación de acentos
+    let nfkd: String = no_separators.nfkd().collect();
     let without_accents = RE_ACCENTS.replace_all(&nfkd, "").to_string();
+
+    // Eliminar caracteres ilegales
     let cleaned = RE_ILLEGAL.replace_all(&without_accents, "_").to_string();
-    let trimmed = cleaned.trim().trim_matches('.').to_string();
-    if trimmed.is_empty() {
-        format!("file_{}", Uuid::new_v4().simple())
+
+    // Trim de espacios y puntos al inicio/fin, y eliminar componentes ".." residuales
+    let trimmed = cleaned
+        .trim()
+        .trim_matches('.')
+        .replace("..", "_")
+        .to_string();
+
+    // Limitar longitud para prevenir DoS por nombres extremadamente largos
+    let limited = if trimmed.len() > 64 {
+        trimmed.chars().take(64).collect::<String>()
     } else {
         trimmed
+    };
+
+    if limited.trim().is_empty() {
+        format!("file_{}", Uuid::new_v4().simple())
+    } else {
+        limited
     }
 }
 
@@ -263,6 +293,9 @@ pub async fn run_training(
     temp_dataset: PathBuf,
     class_names: Vec<String>,
     tx: mpsc::UnboundedSender<ProcessOutput>,
+    // pid_tx: Canal para notificar el PID del proceso hijo a main.rs (parche A-01).
+    // Se usa para registrar el PID en AppState y poder hacer kill() en CloseRequested.
+    pid_tx: Option<tokio::sync::oneshot::Sender<u32>>,
 ) -> Result<TrainingResult> {
     let python_cmd = find_python_interpreter()?;
     let python_core = resolve_python_core_dir(&project_root);
@@ -298,6 +331,12 @@ pub async fn run_training(
         .with_context(|| "No se pudo iniciar proceso Python")?;
 
     let child_id = child.id().unwrap_or(0);
+
+    // PARCHE A-01: Notificar PID al llamador para registrarlo en AppState.
+    if let Some(sender) = pid_tx {
+        let _ = sender.send(child_id);
+    }
+
     let _ = tx.send(ProcessOutput {
         line_type: "log".to_string(),
         content: serde_json::json!({
@@ -306,6 +345,7 @@ pub async fn run_training(
         }),
         raw: format!("[PID] {} iniciado", child_id),
     });
+
 
     let stdout = child
         .stdout

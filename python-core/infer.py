@@ -464,8 +464,18 @@ def main():
                 del model
         except Exception:
             pass
+        # PARCHE B-01: Liberar VRAM explícitamente si se usó CUDA.
+        # Aunque el device actual es "cpu", esto es defensivo para futuros cambios.
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+        except Exception:
+            pass
 
     sys.exit(exit_code)
+
 
 
 if __name__ == "__main__":

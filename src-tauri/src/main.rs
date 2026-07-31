@@ -22,7 +22,11 @@ struct AppState {
     latest_class_names: Mutex<Vec<String>>,
     is_training: Mutex<bool>,
     training_temp_dir: Mutex<Option<PathBuf>>,
+    /// PID del proceso Python activo. Se usa para kill() explícito en CloseRequested
+    /// y evitar procesos huérfanos consumiendo GPU/RAM (parche A-01).
+    active_python_pid: Mutex<Option<u32>>,
 }
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ClassInput {
@@ -170,7 +174,10 @@ async fn start_training(
     let project_root_clone = project_root.clone();
     let class_tuples_clone = class_tuples.clone();
 
-    tokio::spawn(async move {
+    // SEGURIDAD (C-03): Capturamos el JoinHandle para poder detectar pánicos.
+    // Si el spawn entra en pánico, el JoinHandle retorna Err(JoinError::panicked),
+    // lo que garantiza que el watcher exterior pueda resetear is_training = false.
+    let training_handle = tokio::spawn(async move {
         let tx_for_prep = tx.clone();
         let prep_result = prepare_temp_dataset(
             project_root_clone.clone(),
@@ -221,11 +228,24 @@ async fn start_training(
             }
         }
 
+        let (pid_tx, pid_rx) = tokio::sync::oneshot::channel::<u32>();
+        let app_for_pid = app_clone.clone();
+        tokio::spawn(async move {
+            if let Ok(pid) = pid_rx.await {
+                if let Ok(mut g) = app_for_pid.state::<AppState>().active_python_pid.lock() {
+                    *g = Some(pid);
+                }
+            }
+        });
+
+
+
         let training_result = run_training(
             project_root_clone.clone(),
             temp_dir.clone(),
             class_names_clone.clone(),
             tx.clone(),
+            Some(pid_tx),
         )
         .await
         .unwrap_or_else(|e| TrainingResult {
@@ -236,6 +256,11 @@ async fn start_training(
             hyperparameters: None,
             metrics: None,
         });
+
+        // Limpiar PID al finalizar (proceso ya no existe)
+        if let Ok(mut g) = st.active_python_pid.lock() {
+            *g = None;
+        }
 
         if let Some(ref best) = training_result.best_pt_path {
             if let Ok(mut g) = st.latest_best_pt.lock() {
@@ -264,29 +289,110 @@ async fn start_training(
         let _ = app_clone.emit::<TrainingResult>("training:complete", training_result);
     });
 
+    // Watcher de seguridad: si el spawn paniquea (JoinError::panicked),
+    // garantizamos que is_training se resetea a false (parche C-03).
+    let app_panic_guard = app.clone();
+    tokio::spawn(async move {
+        if let Err(join_err) = training_handle.await {
+            eprintln!("[DeepSight] PANIC en training spawn: {:?}", join_err);
+            let st = app_panic_guard.state::<AppState>();
+            if let Ok(mut g) = st.is_training.lock() {
+                *g = false;
+            }
+            if let Ok(mut g) = st.training_temp_dir.lock() {
+                *g = None;
+            }
+            let _ = app_panic_guard.emit::<TrainingResult>(
+                "training:complete",
+                TrainingResult {
+                    success: false,
+                    best_pt_path: None,
+                    class_names: vec![],
+                    error_message: Some(
+                        "Error interno inesperado en el motor de entrenamiento. Reinicia la aplicacion."
+                            .to_string(),
+                    ),
+                    hyperparameters: None,
+                    metrics: None,
+                },
+            );
+        }
+    });
+
+
     let app_clone_rx = app.clone();
     tokio::spawn(async move {
-        while let Some(output) = rx.recv().await {
-            let emit_type = match output.line_type.as_str() {
-                "progress" => "training:progress",
-                "log" => "training:log",
-                "hyperparameters" => "training:hyperparameters",
-                "complete" => "training:json_complete",
-                "error" => "training:error",
-                _ => "training:raw",
-            };
-            let _ = app_clone_rx.emit(emit_type, output.clone());
+        // PARCHE A-03: Rate-limiting del IPC bridge.
+        // Los eventos 'log' y 'raw' se acumulan en un buffer y se emiten en batch
+        // cada 150ms para evitar saturar el WebView con decenas de mensajes/segundo.
+        // Los eventos críticos (progress, hyperparameters, complete, error) pasan sin throttling.
+        use tokio::time::{interval, Duration};
+        let mut flush_ticker = interval(Duration::from_millis(150));
+        let mut log_buffer: Vec<ProcessOutput> = Vec::new();
 
-            if output.line_type == "complete" {
-                if let Some(best) = output.content.get("best_pt_path").and_then(|v| v.as_str()) {
-                    let st = app_clone_rx.state::<AppState>();
-                    if let Ok(mut g) = st.latest_best_pt.lock() {
-                        *g = Some(best.to_string());
-                    };
+        loop {
+            tokio::select! {
+                msg = rx.recv() => {
+                    match msg {
+                        None => {
+                            // Canal cerrado: vaciar buffer pendiente y salir
+                            if !log_buffer.is_empty() {
+                                let batch = std::mem::take(&mut log_buffer);
+                                let _ = app_clone_rx.emit("training:log_batch", &batch);
+                            }
+                            break;
+                        }
+                        Some(output) => {
+                            let is_critical = matches!(
+                                output.line_type.as_str(),
+                                "progress" | "hyperparameters" | "complete" | "error"
+                            );
+
+                            if is_critical {
+                                // Vaciar buffer acumulado antes de emitir el crítico
+                                if !log_buffer.is_empty() {
+                                    let batch = std::mem::take(&mut log_buffer);
+                                    let _ = app_clone_rx.emit("training:log_batch", &batch);
+                                }
+                                let emit_type = match output.line_type.as_str() {
+                                    "progress" => "training:progress",
+                                    "hyperparameters" => "training:hyperparameters",
+                                    "complete" => "training:json_complete",
+                                    "error" => "training:error",
+                                    _ => "training:log",
+                                };
+                                let _ = app_clone_rx.emit(emit_type, output.clone());
+
+                                if output.line_type == "complete" {
+                                    if let Some(best) = output.content.get("best_pt_path").and_then(|v| v.as_str()) {
+                                        if let Ok(mut g) = app_clone_rx.state::<AppState>().latest_best_pt.lock() {
+                                            *g = Some(best.to_string());
+                                        }
+                                    }
+                                }
+
+                            } else {
+                                // Acumular en buffer para el próximo flush
+                                log_buffer.push(output);
+                                // Límite de buffer para no acumular memoria indefinidamente
+                                if log_buffer.len() >= 50 {
+                                    let batch = std::mem::take(&mut log_buffer);
+                                    let _ = app_clone_rx.emit("training:log_batch", &batch);
+                                }
+                            }
+                        }
+                    }
+                }
+                _ = flush_ticker.tick() => {
+                    if !log_buffer.is_empty() {
+                        let batch = std::mem::take(&mut log_buffer);
+                        let _ = app_clone_rx.emit("training:log_batch", &batch);
+                    }
                 }
             }
         }
     });
+
 
     Ok(StartTrainingResponse {
         success: true,
@@ -376,6 +482,31 @@ fn main() {
 
     tauri::Builder::default()
         .on_window_event(|window, event| {
+            // PARCHE A-01: Matar proceso Python huérfano en cierre de ventana.
+            // kill_on_drop(true) no es suficiente si el runtime Tokio se destruye
+            // antes de que el Drop del Child se ejecute. El kill() explícito garantiza
+            // que el proceso no sobreviva consumiendo GPU/RAM.
+            if let WindowEvent::CloseRequested { .. } = event {
+                if let Ok(pid_guard) = window.app_handle().state::<AppState>().active_python_pid.lock() {
+                    if let Some(pid) = *pid_guard {
+                        #[cfg(windows)]
+                        {
+                            // En Windows usamos taskkill para matar el árbol de procesos completo
+                            let _ = std::process::Command::new("taskkill")
+                                .args(["/F", "/T", "/PID", &pid.to_string()])
+                                .output();
+                        }
+                        #[cfg(not(windows))]
+                        {
+                            let _ = std::process::Command::new("kill")
+                                .args(["-9", &pid.to_string()])
+                                .output();
+                        }
+                        eprintln!("[DeepSight] Proceso Python (PID {}) terminado en cierre de ventana.", pid);
+                    }
+                }
+            }
+
             if let WindowEvent::DragDrop(DragDropEvent::Drop { paths, .. }) = event {
                 let path_strings: Vec<String> = paths
                     .iter()

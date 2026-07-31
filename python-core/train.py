@@ -116,7 +116,25 @@ def sanitize_label(name):
 
 
 def is_image_file(path):
-    return path.is_file() and path.suffix.lower() in VALID_IMAGE_EXT
+    """Valida que el archivo sea una imagen legible, no esté vacío y no esté corrupto.
+    PARCHE A-04: Previene que imágenes de 0 bytes o corruptas aborten el entrenamiento.
+    """
+    if not (path.is_file() and path.suffix.lower() in VALID_IMAGE_EXT):
+        return False
+    # Verificar tamaño mínimo (un PNG válido mínimo son ~67 bytes)
+    try:
+        if path.stat().st_size < 64:
+            return False
+    except OSError:
+        return False
+    # Apertura rápida con PIL para detectar corrupción sin cargar en memoria completa
+    try:
+        from PIL import Image
+        with Image.open(path) as img:
+            img.verify()  # verify() detecta corrupción sin decodificar completamente
+        return True
+    except Exception:
+        return False
 
 
 def extract_class_index(class_dir):

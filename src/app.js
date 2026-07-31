@@ -48,40 +48,12 @@ window.addEventListener('drop', (e) => e.preventDefault());
     return document.getElementById(id);
   }
 
-  // #region debug-point A:reporter
-  function debugReport(hypothesisId, location, msg, data) {
-    fetch('http://127.0.0.1:7777/event', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        sessionId: 'app-stuck-loading',
-        runId: 'pre-fix',
-        hypothesisId: hypothesisId,
-        location: location,
-        msg: '[DEBUG] ' + msg,
-        data: data || {},
-        ts: Date.now(),
-      }),
-    }).catch(() => {});
+  // Debug reporter: no-op en producción. Para activar en desarrollo local,
+  // reemplaza el cuerpo con la llamada a fetch al servidor de debug.
+  // eslint-disable-next-line no-unused-vars
+  function debugReport(_hypothesisId, _location, _msg, _data) {
+    // no-op en producción
   }
-  // #endregion
-
-  // #region debug-point B:global-errors
-  window.addEventListener('error', (event) => {
-    debugReport('B', 'src/app.js:global-error', 'window.error', {
-      message: event && event.message,
-      filename: event && event.filename,
-      lineno: event && event.lineno,
-      colno: event && event.colno,
-    });
-  });
-  window.addEventListener('unhandledrejection', (event) => {
-    const reason = event && event.reason;
-    debugReport('B', 'src/app.js:unhandledrejection', 'window.unhandledrejection', {
-      message: reason && reason.message ? reason.message : String(reason),
-    });
-  });
-  // #endregion
 
   function getTauriGlobal() {
     return typeof window.__TAURI__ === 'object' ? window.__TAURI__ : null;
@@ -408,8 +380,14 @@ window.addEventListener('drop', (e) => e.preventDefault());
 
   function renderClassFile(cls, fileListEl, countEl, badgeEl) {
     fileListEl.innerHTML = '';
-    for (let i = 0; i < cls.images.length; i++) {
-      const path = cls.images[i];
+    // PARCHE M-01: Limitar renderizado DOM a 200 items para evitar congelamiento.
+    // El estado interno (cls.images) conserva todos los paths.
+    const MAX_VISIBLE = 200;
+    const totalCount = cls.images.length;
+    const visibleImages = cls.images.slice(0, MAX_VISIBLE);
+
+    for (let i = 0; i < visibleImages.length; i++) {
+      const path = visibleImages[i];
       const parts = path.replace(/\\/g, '/').split('/');
       const originalName = parts[parts.length - 1] || path;
       const item = document.createElement('div');
@@ -426,15 +404,27 @@ window.addEventListener('drop', (e) => e.preventDefault());
         <button class="file-item-remove" title="Quitar">×</button>
       `;
       item.querySelector('.file-item-name').textContent = originalName;
+      const capturedIndex = i;
       const rm = item.querySelector('.file-item-remove');
       rm.addEventListener('click', (ev) => {
         ev.stopPropagation();
-        cls.images.splice(i, 1);
+        cls.images.splice(capturedIndex, 1);
         renderClassFile(cls, fileListEl, countEl, badgeEl);
         updateTrainBadge();
       });
       fileListEl.appendChild(item);
     }
+
+    // Mostrar indicador de overflow si hay más de MAX_VISIBLE imágenes
+    if (totalCount > MAX_VISIBLE) {
+      const overflow = document.createElement('div');
+      overflow.className = 'file-item';
+      overflow.style.opacity = '0.6';
+      overflow.style.fontStyle = 'italic';
+      overflow.textContent = `... y ${totalCount - MAX_VISIBLE} imagen(es) más (no mostradas por rendimiento)`;
+      fileListEl.appendChild(overflow);
+    }
+
     updateClassFooter(cls, countEl, badgeEl);
   }
 
@@ -482,22 +472,36 @@ window.addEventListener('drop', (e) => e.preventDefault());
     const refs = getClassUiRefs(classId);
     if (!cls || !refs || !Array.isArray(paths) || paths.length === 0) return 0;
 
-    let added = 0;
-    for (const path of paths) {
-      if (typeof path !== 'string' || !isImagePath(path)) continue;
-      if (cls.images.indexOf(path) !== -1) continue;
-      cls.images.push(path);
-      added++;
+    // PARCHE M-01: Deduplicación O(1) con Set en lugar del indexOf O(n²)
+    const existingSet = new Set(cls.images);
+    const newPaths = [];
+
+    // Procesar en chunks para no bloquear el hilo principal con 5000 archivos
+    const CHUNK_SIZE = 200;
+    for (let i = 0; i < paths.length; i += CHUNK_SIZE) {
+      const chunk = paths.slice(i, i + CHUNK_SIZE);
+      for (const path of chunk) {
+        if (typeof path !== 'string' || !isImagePath(path)) continue;
+        if (existingSet.has(path)) continue;
+        existingSet.add(path);
+        newPaths.push(path);
+      }
+      // Yield al event loop cada chunk para evitar congelamiento
+      if (i + CHUNK_SIZE < paths.length) {
+        await new Promise((r) => setTimeout(r, 0));
+      }
     }
 
-    if (added > 0) {
+    if (newPaths.length > 0) {
+      cls.images.push(...newPaths);
       renderClassFile(cls, refs.fileList, refs.countEl, refs.badgeEl);
       updateTrainBadge();
-      logLine(`[Clase "${cls.name}"] ${added} imagen(es) agregadas. Total: ${cls.images.length}`, 'info');
+      logLine(`[Clase "${cls.name}"] ${newPaths.length} imagen(es) agregadas. Total: ${cls.images.length}`, 'info');
     }
 
-    return added;
+    return newPaths.length;
   }
+
 
   function findDropzoneClassIdFromPosition(position) {
     if (!position) return null;
@@ -937,7 +941,14 @@ window.addEventListener('drop', (e) => e.preventDefault());
   function bindTrainButton() {
     const btn = el('btn-train');
     if (!btn) return;
+    // PARCHE A-02: flag de guardia local para cerrar la ventana de race condition
+    // entre el click y el momento en que Rust activa is_training en su Mutex.
+    let _isTrainingInFlight = false;
+
     btn.addEventListener('click', async () => {
+      // Bloqueo inmediato antes del invoke async para prevenir doble-disparo
+      if (_isTrainingInFlight) return;
+
       if (!hasTauri()) {
         alert('Tauri no disponible. Para entrenar ejecuta: cargo tauri dev');
         return;
@@ -955,6 +966,10 @@ window.addEventListener('drop', (e) => e.preventDefault());
         return;
       }
 
+      // Marcar in-flight Y deshabilitar visualmente ANTES del invoke
+      _isTrainingInFlight = true;
+      btn.disabled = true;
+
       state.trainingTotalEpochs = TOTAL_EPOCHS_FALLBACK;
       updateOverlayEpoch(0, state.trainingTotalEpochs);
       showTrainingOverlay();
@@ -965,17 +980,23 @@ window.addEventListener('drop', (e) => e.preventDefault());
           classes: classesToSend,
         });
         if (!res || !res.success) {
+          // El invoke respondió con error: restaurar botón
+          _isTrainingInFlight = false;
           hideTrainingOverlay();
           showDialog({
             title: 'No se pudo iniciar',
             message: (res && res.message) || 'Error desconocido',
             kind: 'error',
           });
+          // Restaurar estado del botón según validez de datos
+          updateTrainBadge();
         } else {
           appendOverlayLog('Proceso iniciado correctamente.', 'success');
           logLine('Entrenamiento iniciado en segundo plano.', 'info');
+          // _isTrainingInFlight se resetea cuando llega training:complete
         }
       } catch (e) {
+        _isTrainingInFlight = false;
         hideTrainingOverlay();
         appendOverlayLog('Error: ' + e.message, 'error');
         logLine('Error iniciando entrenamiento: ' + e.message, 'error');
@@ -984,9 +1005,17 @@ window.addEventListener('drop', (e) => e.preventDefault());
           message: e.message || String(e),
           kind: 'error',
         });
+        updateTrainBadge();
       }
     });
+
+    // Resetear el flag in-flight cuando el entrenamiento termina (éxito o error)
+    // Nos suscribimos al evento global via una función accesible al scope
+    window._resetTrainingInFlight = () => {
+      _isTrainingInFlight = false;
+    };
   }
+
 
   function bindExportButton() {
     const btn = el('btn-export');
@@ -1103,6 +1132,24 @@ window.addEventListener('drop', (e) => e.preventDefault());
       appendOverlayLog(msg, level);
     });
 
+    // PARCHE A-03: Listener para el batch de logs (rate-limited).
+    // Rust ahora agrupa los eventos 'log' y 'raw' en batches de 150ms.
+    attach('training:log_batch', (evt) => {
+      const batch = evt && evt.payload;
+      if (!Array.isArray(batch)) return;
+      for (const p of batch) {
+        if (!p) continue;
+        const content = p.content || {};
+        const level = content.level || 'info';
+        const msg = content.message || p.raw || '';
+        if (msg.trim()) {
+          logLine(msg, level);
+          appendOverlayLog(msg, level);
+        }
+      }
+    });
+
+
     attach('training:progress', (evt) => {
       const p = evt && evt.payload;
       if (!p) return;
@@ -1150,6 +1197,10 @@ window.addEventListener('drop', (e) => e.preventDefault());
     attach('training:complete', (evt) => {
       const r = evt && evt.payload;
       if (!r) return;
+      // PARCHE A-02: Resetear el guard de in-flight para permitir nuevos entrenamientos
+      if (typeof window._resetTrainingInFlight === 'function') {
+        window._resetTrainingInFlight();
+      }
       setTimeout(() => {
         hideTrainingOverlay();
         if (r.success && r.best_pt_path) {
@@ -1177,8 +1228,11 @@ window.addEventListener('drop', (e) => e.preventDefault());
             kind: 'error',
           });
         }
+        // Restaurar estado visual del botón de entrenamiento
+        updateTrainBadge();
       }, 600);
     });
+
 
     attach('training:json_complete', (evt) => {
       const p = evt && evt.payload;
@@ -1191,12 +1245,6 @@ window.addEventListener('drop', (e) => e.preventDefault());
   }
 
   async function boot() {
-    // #region debug-point C:boot-start
-    debugReport('C', 'src/app.js:boot:start', 'boot start', {
-      hasTauri: hasTauri(),
-      readyState: document.readyState,
-    });
-    // #endregion
     const hwTxt = el('hw-info-text');
     if (hwTxt) hwTxt.textContent = 'Iniciando...';
     bindThemeToggle();
@@ -1205,41 +1253,18 @@ window.addEventListener('drop', (e) => e.preventDefault());
     bindExportButton();
     bindTestDropzone();
     setupTauriListeners();
-    // #region debug-point D:dragdrop-setup
-    debugReport('D', 'src/app.js:boot:before-dragdrop', 'setupNativeDragDrop start', {});
-    // #endregion
     setupNativeDragDrop();
-    // #region debug-point D:dragdrop-setup-done
-    debugReport('D', 'src/app.js:boot:after-dragdrop', 'setupNativeDragDrop returned', {});
-    // #endregion
 
     document.documentElement.dataset.tauriBridge = hasTauri() ? 'ready' : 'missing';
 
     const splashDelay = hasTauri() ? 1200 : 500;
-    // #region debug-point E:hide-splash-scheduled
-    debugReport('E', 'src/app.js:boot:hideSplash:scheduled', 'hideSplash scheduled', {
-      delay: splashDelay,
-    });
-    // #endregion
     setTimeout(() => {
-      // #region debug-point E:hide-splash-fired
-      debugReport('E', 'src/app.js:boot:hideSplash:fired', 'hideSplash fired', {});
-      // #endregion
       hideSplash();
     }, splashDelay);
 
     if (hasTauri()) {
       try {
-        // #region debug-point A:get-system-info-start
-        debugReport('A', 'src/app.js:boot:get_system_info:start', 'invoke get_system_info start', {});
-        // #endregion
         const info = await invokeTauri('get_system_info');
-        // #region debug-point A:get-system-info-ok
-        debugReport('A', 'src/app.js:boot:get_system_info:ok', 'invoke get_system_info ok', {
-          python_available: info && info.python_available,
-          cpu_cores: info && info.cpu_cores,
-        });
-        // #endregion
         setHwBadge(info);
         if (!info.python_available) {
           setTimeout(() => {
@@ -1257,11 +1282,6 @@ window.addEventListener('drop', (e) => e.preventDefault());
           }, 700);
         }
       } catch (e) {
-        // #region debug-point A:get-system-info-error
-        debugReport('A', 'src/app.js:boot:get_system_info:error', 'invoke get_system_info error', {
-          message: e && e.message ? e.message : String(e),
-        });
-        // #endregion
         logLine('Error obteniendo info del sistema: ' + e.message, 'warning');
         if (hwTxt) hwTxt.textContent = 'No se pudo detectar hardware';
       }
@@ -1277,9 +1297,6 @@ window.addEventListener('drop', (e) => e.preventDefault());
     createClassCard();
     createClassCard();
 
-    // #region debug-point C:boot-end
-    debugReport('C', 'src/app.js:boot:end', 'boot end', {});
-    // #endregion
     logLine('DeepSight v2.0 - Listo para operar.', 'success');
     logLine('Paso 1: Define al menos 2 clases. Paso 2: Arrastra imagenes. Paso 3: Entrena!', 'info');
   }
