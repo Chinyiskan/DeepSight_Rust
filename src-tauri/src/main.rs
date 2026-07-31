@@ -147,6 +147,21 @@ async fn start_training(
         *training_guard = true;
     }
 
+    // Limpiar el modelo anterior en temp si existía antes de iniciar un nuevo entrenamiento
+    {
+        if let Ok(mut guard) = state.latest_best_pt.lock() {
+            if let Some(ref old_path_str) = *guard {
+                let old_path = PathBuf::from(old_path_str);
+                if let Some(parent) = old_path.parent() {
+                    if parent.starts_with(std::env::temp_dir().join("DeepSight")) && parent.exists() {
+                        let _ = std::fs::remove_dir_all(parent);
+                    }
+                }
+            }
+            *guard = None;
+        }
+    }
+
     let class_tuples: Vec<(String, Vec<String>)> = classes
         .iter()
         .map(|c| (c.name.trim().to_string(), c.images.clone()))

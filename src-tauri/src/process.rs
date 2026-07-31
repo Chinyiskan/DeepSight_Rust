@@ -711,37 +711,13 @@ fn parse_python_line(line: &str) -> ProcessOutput {
 }
 
 pub fn cleanup_temp_files(project_root: &Path, temp_dataset: &Path) {
-    if temp_dataset.exists() {
+    if temp_dataset.exists() && temp_dataset.as_os_str().len() > 0 {
         if let Err(e) = std::fs::remove_dir_all(temp_dataset) {
             eprintln!(
-                "[cleanup] No se pudo borrar {}: {}",
+                "[cleanup] No se pudo borrar dataset temporal {}: {}",
                 temp_dataset.display(),
                 e
             );
-        }
-    }
-
-    // Barrido secundario: limpiar cualquier sesión de DeepSight huérfana en temp del SO.
-    let sys_temp_root = std::env::temp_dir().join("DeepSight");
-    if sys_temp_root.exists() {
-        match std::fs::read_dir(&sys_temp_root) {
-            Ok(entries) => {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_dir() {
-                        if let Err(e) = std::fs::remove_dir_all(&path) {
-                            eprintln!("[cleanup] No se pudo borrar dir {}: {}", path.display(), e);
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!(
-                    "[cleanup] No se pudo leer DeepSight temp {}: {}",
-                    sys_temp_root.display(),
-                    e
-                );
-            }
         }
     }
 

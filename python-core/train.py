@@ -371,26 +371,67 @@ def main():
         print_log("Entrenamiento completado. Procesando resultados...", "success")
         print_progress(hp["epochs"], hp["epochs"], "finalizing")
 
+        final_output_path = (safe_output_dir / "best.pt").resolve()
+
+        # Buscar explícitamente el archivo best.pt / last.pt en las subcarpetas de pesos (weights/best.pt)
+        candidate_sources = []
+
+        # 1. Atributo save_dir del resultado de Ultralytics
+        if hasattr(results, "save_dir") and results.save_dir:
+            res_dir = Path(results.save_dir).resolve()
+            candidate_sources.extend([
+                res_dir / "weights" / "best.pt",
+                res_dir / "weights" / "last.pt",
+                res_dir / "best.pt",
+            ])
+
+        # 2. Atributo trainer.save_dir del modelo
+        if hasattr(model, "trainer") and getattr(model.trainer, "save_dir", None):
+            trainer_dir = Path(model.trainer.save_dir).resolve()
+            candidate_sources.extend([
+                trainer_dir / "weights" / "best.pt",
+                trainer_dir / "weights" / "last.pt",
+                trainer_dir / "best.pt",
+            ])
+
+        # 3. Rutas estándar con safe_output_dir / train_output / weights
         save_dir = runs_output_dir / "train_output"
-        best_pt_source = save_dir / "weights" / "best.pt"
+        candidate_sources.extend([
+            save_dir / "weights" / "best.pt",
+            save_dir / "weights" / "last.pt",
+            safe_output_dir / "weights" / "best.pt",
+            safe_output_dir / "weights" / "last.pt",
+        ])
 
-        if not best_pt_source.exists():
-            alt = save_dir / "weights" / "last.pt"
-            if alt.exists():
-                best_pt_source = alt
+        # 4. Búsqueda por rglob en safe_output_dir (por si Ultralytics creó carpetas con sufijo)
+        for p in safe_output_dir.rglob("best.pt"):
+            if p.resolve() != final_output_path:
+                candidate_sources.append(p.resolve())
+        for p in safe_output_dir.rglob("last.pt"):
+            if p.resolve() != final_output_path:
+                candidate_sources.append(p.resolve())
 
-        # El modelo final se guarda dentro del mismo directorio temporal seguro.
-        # Rust lee la ruta exacta desde el campo "best_pt_path" del JSON "complete"
-        # y desde ahi lo copia/mueve a donde necesite (AppData, etc.).
-        final_output_path = safe_output_dir / "best.pt"
+        # 5. Búsqueda en el directorio de trabajo (runs/...)
+        for p in Path.cwd().rglob("best.pt"):
+            if p.resolve() != final_output_path:
+                candidate_sources.append(p.resolve())
+        for p in Path.cwd().rglob("last.pt"):
+            if p.resolve() != final_output_path:
+                candidate_sources.append(p.resolve())
 
-        if best_pt_source.exists():
+        best_pt_source = None
+        for cand in candidate_sources:
+            if cand and cand.exists() and cand.is_file() and cand.stat().st_size > 0:
+                best_pt_source = cand
+                break
+
+        if best_pt_source:
             shutil.copy2(str(best_pt_source), str(final_output_path))
-            print_log(f"Modelo best.pt copiado a: {final_output_path}", "success")
+            print_log(f"Modelo encontrado en '{best_pt_source}' y copiado a: {final_output_path}", "success")
         else:
             print_json({
                 "type": "error",
-                "message": "No se encontro best.pt ni last.pt despues del entrenamiento"
+                "message": f"No se encontro best.pt ni last.pt en la carpeta de pesos despué del entrenamiento en {safe_output_dir}"
             })
             sys.exit(1)
 
