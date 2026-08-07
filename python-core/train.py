@@ -117,25 +117,86 @@ def sanitize_label(name):
     return safe or "class"
 
 
-def is_image_file(path):
+def is_image_file(path, log_fn=None):
     """Valida que el archivo sea una imagen legible, no esté vacío y no esté corrupto.
-    PARCHE A-04: Previene que imágenes de 0 bytes o corruptas aborten el entrenamiento.
+
+    Realiza 4 comprobaciones en orden:
+      1. Existencia y tipo de archivo
+      2. Extensión en VALID_IMAGE_EXT
+      3. Tamaño mínimo > 0 (un PNG válido mínimo son ~67 bytes)
+      4. Apertura con Pillow + Image.verify()
+
+    NOTA IMPORTANTE sobre Image.verify():
+      El método verify() deja el objeto Image en un estado no reutilizable.
+      Por diseño de Pillow, después de llamar verify() el handle interno queda
+      cerrado/agotado. Si la imagen supera esta validación, quien la necesite
+      para lectura o copia DEBE abrirla de nuevo con Image.open().
+      Aquí solo validamos; la copia se hace vía shutil.copy2() sobre el path.
+
+    Args:
+        path: pathlib.Path al archivo a validar.
+        log_fn: callable(message, level) para registrar el motivo de rechazo.
+                Si es None, los rechazos se descartan silenciosamente.
+
+    Returns:
+        True si la imagen pasa todas las comprobaciones, False en caso contrario.
     """
-    if not (path.is_file() and path.suffix.lower() in VALID_IMAGE_EXT):
+    def _warn(msg):
+        if log_fn is not None:
+            log_fn(msg, "warning")
+
+    # Capa 1: existencia y tipo
+    if not path.exists():
+        _warn(f"Imagen ignorada — no existe en disco: {path}. Acción: descartando.")
         return False
-    # Verificar tamaño mínimo (un PNG válido mínimo son ~67 bytes)
-    try:
-        if path.stat().st_size < 64:
-            return False
-    except OSError:
+    if not path.is_file():
+        _warn(f"Imagen ignorada — no es un archivo regular (puede ser directorio): {path}. Acción: descartando.")
         return False
-    # Apertura rápida con PIL para detectar corrupción sin cargar en memoria completa
+
+    # Capa 2: extensión
+    ext = path.suffix.lower()
+    if ext not in VALID_IMAGE_EXT:
+        _warn(
+            f"Imagen ignorada — extensión '{ext}' no soportada en '{path.name}'. "
+            f"Extensiones válidas: {sorted(VALID_IMAGE_EXT)}. Acción: descartando."
+        )
+        return False
+
+    # Capa 3: tamaño mínimo
     try:
-        from PIL import Image
+        size = path.stat().st_size
+    except OSError as e:
+        _warn(f"Imagen ignorada — no se pudo leer tamaño de '{path.name}': {type(e).__name__}: {e}. Acción: descartando.")
+        return False
+    if size == 0:
+        _warn(f"Imagen ignorada — archivo vacío (0 bytes): '{path.name}'. Acción: descartando.")
+        return False
+    if size < 64:
+        _warn(
+            f"Imagen ignorada — archivo demasiado pequeño ({size} bytes) para ser una imagen válida: '{path.name}'. "
+            f"Acción: descartando."
+        )
+        return False
+
+    # Capa 4: apertura y verificación con Pillow
+    # IMPORTANTE: verify() invalida el handle; no reutilizar el objeto Image.
+    # La copia posterior usa shutil.copy2() sobre el Path, no sobre este handle.
+    try:
+        from PIL import Image, UnidentifiedImageError
         with Image.open(path) as img:
-            img.verify()  # verify() detecta corrupción sin decodificar completamente
+            img.verify()
         return True
-    except Exception:
+    except UnidentifiedImageError as e:
+        _warn(
+            f"Imagen ignorada — Pillow no reconoce el formato de '{path.name}': "
+            f"UnidentifiedImageError: {e}. Acción: descartando."
+        )
+        return False
+    except Exception as e:
+        _warn(
+            f"Imagen ignorada — fallo en verify() para '{path.name}': "
+            f"{type(e).__name__}: {e}. El archivo puede estar corrupto o truncado. Acción: descartando."
+        )
         return False
 
 
@@ -185,6 +246,19 @@ def split_counts(total_images):
 
 
 def prepare_classification_dataset(dataset_path, class_names):
+    """Prepara el dataset de clasificación dividido en train/val.
+
+    Tolerancia a imágenes inválidas:
+      - Cada imagen se valida con is_image_file() antes de ser usada.
+      - Las imágenes que no pasan la validación se ignoran individualmente
+        con un warning; NO se cancela el entrenamiento por una sola imagen.
+      - El entrenamiento solo se cancela si, tras el filtrado, una clase
+        queda con CERO imágenes válidas.
+
+    Manejo de errores de copia:
+      - PermissionError y OSError se capturan con mensajes que identifican
+        el archivo fuente y el destino exactos.
+    """
     dataset_dir = Path(dataset_path).resolve()
     split_root = dataset_dir.parent / f"{dataset_dir.name}_cls"
 
@@ -200,22 +274,113 @@ def prepare_classification_dataset(dataset_path, class_names):
 
     for idx, class_name in enumerate(class_names):
         source_dir = class_dir_map[idx]
-        image_files = sorted([p for p in source_dir.iterdir() if is_image_file(p)], key=lambda p: p.name.lower())
-        if not image_files:
-            raise RuntimeError(f"La clase '{class_name}' no contiene imagenes validas")
 
-        train_count, _ = split_counts(len(image_files))
+        # Recolectar todos los candidatos antes de filtrar
+        try:
+            candidates = sorted(source_dir.iterdir(), key=lambda p: p.name.lower())
+        except PermissionError as e:
+            raise RuntimeError(
+                f"Sin permisos para leer la carpeta de clase '{class_name}' "
+                f"en '{source_dir}': {e}"
+            ) from e
+        except OSError as e:
+            raise RuntimeError(
+                f"Error de sistema al leer carpeta de clase '{class_name}' "
+                f"en '{source_dir}': {type(e).__name__}: {e}"
+            ) from e
+
+        # Filtrar con validación individual — una imagen inválida no cancela la clase.
+        # Usamos un log_fn capturador: registra el warning normalmente Y almacena
+        # el motivo asociado al archivo actual para el resumen final de clase.
+        valid_images = []
+        rejected_details = []   # lista de (nombre_archivo, motivo_breve)
+
+        # _last_reason actúa como buffer de un solo elemento: is_image_file()
+        # llama a log_fn exactamente una vez cuando rechaza un archivo.
+        _last_reason: list = []
+
+        def _capturing_log(msg, level):
+            """Registra el mensaje normalmente y captura la razón de rechazo."""
+            print_log(msg, level)
+            if level == "warning":
+                _last_reason.clear()
+                _last_reason.append(msg)
+
+        for candidate in candidates:
+            _last_reason.clear()
+            if is_image_file(candidate, log_fn=_capturing_log):
+                valid_images.append(candidate)
+            elif candidate.is_file():
+                # Extraer motivo breve: quitar prefijo "Imagen ignorada — " para el resumen
+                raw_reason = _last_reason[0] if _last_reason else "Razón no especificada"
+                brief = raw_reason.replace("Imagen ignorada — ", "").split(". Acción:")[0]
+                rejected_details.append((candidate.name, brief))
+
+        # ── Resumen por clase ─────────────────────────────────────────────────
+        total_candidates = len(valid_images) + len(rejected_details)
+        print_log(
+            f"=== Resumen de clase '{class_name}' ===",
+            "info"
+        )
+        print_log(
+            f"  Encontradas : {total_candidates} archivo(s)",
+            "info"
+        )
+        print_log(
+            f"  Aceptadas   : {len(valid_images)} imagen(es) válida(s)",
+            "info"
+        )
+        print_log(
+            f"  Descartadas : {len(rejected_details)} archivo(s)",
+            "warning" if rejected_details else "info"
+        )
+        if rejected_details:
+            print_log("  Detalle de descartadas:", "warning")
+            for name, reason in rejected_details:
+                print_log(f"    - {name} → {reason}", "warning")
+        # ── Fin resumen ───────────────────────────────────────────────────────
+
+        # Cancelar solo si la clase queda completamente sin imágenes válidas
+        if not valid_images:
+            raise RuntimeError(
+                f"La clase '{class_name}' no contiene imágenes válidas tras el filtrado. "
+                f"Se descartaron {len(rejected_details)} archivo(s). "
+                f"Verifica que las imágenes no estén corruptas y tengan extensión válida: "
+                f"{sorted(VALID_IMAGE_EXT)}"
+            )
+
+        train_count, _ = split_counts(len(valid_images))
         folder_name = f"{idx:04d}_{sanitize_label(class_name)}"
         train_class_dir = train_root / folder_name
         val_class_dir = val_root / folder_name
         train_class_dir.mkdir(parents=True, exist_ok=True)
         val_class_dir.mkdir(parents=True, exist_ok=True)
 
-        for image_idx, image_path in enumerate(image_files):
+        for image_idx, image_path in enumerate(valid_images):
             target_root = train_class_dir if image_idx < train_count else val_class_dir
-            shutil.copy2(str(image_path), str(target_root / image_path.name))
+            dest_path = target_root / image_path.name
+            # NOTA: No reutilizamos el objeto Image de verify() porque verify()
+            # invalida el handle. shutil.copy2() trabaja sobre el Path original,
+            # que sigue siendo completamente válido para lectura.
+            try:
+                shutil.copy2(str(image_path), str(dest_path))
+            except PermissionError as e:
+                raise RuntimeError(
+                    f"Sin permisos para copiar '{image_path.name}' "
+                    f"(clase '{class_name}') "
+                    f"→ '{dest_path}': PermissionError: {e}. "
+                    f"Acción: abortando preparación del dataset."
+                ) from e
+            except OSError as e:
+                raise RuntimeError(
+                    f"Error de sistema al copiar '{image_path.name}' "
+                    f"(clase '{class_name}') "
+                    f"→ '{dest_path}': {type(e).__name__}: {e}. "
+                    f"Acción: abortando preparación del dataset."
+                ) from e
 
     return split_root
+
 
 
 def to_float_or_none(value):

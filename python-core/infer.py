@@ -339,6 +339,37 @@ def main():
         image_path = sys.argv[2]
         class_names_raw = sys.argv[3]
 
+        # ── PATH-DIAG: Registro diagnóstico de rutas recibidas desde Rust ─────
+        # No modifica ningún comportamiento. Solo registra lo que Python ve
+        # para comparar con el bloque equivalente en process.rs (Rust).
+        # repr() es una función integrada de Python; no requiere importación.
+        model_file_diag = Path(model_path)
+        image_file_diag = Path(image_path)
+        print_log(f"[PATH-DIAG] === model_path ===", "debug")
+        print_log(f"[PATH-DIAG] sys.argv[1] repr      : {repr(model_path)}", "debug")
+        print_log(f"[PATH-DIAG] Path(model_path) repr : {repr(str(model_file_diag))}", "debug")
+        print_log(f"[PATH-DIAG] suffix                : {repr(model_file_diag.suffix)}", "debug")
+        print_log(f"[PATH-DIAG] exists()              : {model_file_diag.exists()}", "debug")
+        print_log(f"[PATH-DIAG] is_file()             : {model_file_diag.is_file()}", "debug")
+        try:
+            print_log(f"[PATH-DIAG] resolve()             : {repr(str(model_file_diag.resolve()))}", "debug")
+        except Exception as e:
+            print_log(f"[PATH-DIAG] resolve() ERROR       : {type(e).__name__}: {e}", "debug")
+        print_log(f"[PATH-DIAG] === image_path ===", "debug")
+        print_log(f"[PATH-DIAG] sys.argv[2] repr      : {repr(image_path)}", "debug")
+        print_log(f"[PATH-DIAG] Path(image_path) repr : {repr(str(image_file_diag))}", "debug")
+        print_log(f"[PATH-DIAG] suffix                : {repr(image_file_diag.suffix)}", "debug")
+        print_log(f"[PATH-DIAG] exists()              : {image_file_diag.exists()}", "debug")
+        print_log(f"[PATH-DIAG] is_file()             : {image_file_diag.is_file()}", "debug")
+        # Detección proactiva de condiciones problemáticas
+        if model_path.endswith('/') or model_path.endswith('\\'):
+            print_log(f"[PATH-DIAG] ⚠ ALERTA: model_path termina con separador de directorio", "warning")
+        if model_path.startswith(r'\\?\\'):
+            print_log(f"[PATH-DIAG] ⚠ ALERTA: model_path tiene prefijo UNC \\\\?\\", "warning")
+        if model_file_diag.suffix != '.pt':
+            print_log(f"[PATH-DIAG] ⚠ ALERTA: suffix no es '.pt' — suffix={repr(model_file_diag.suffix)}", "warning")
+        # ── FIN PATH-DIAG ──────────────────────────────────────────────────────
+
         model_file = Path(model_path)
         if not model_file.is_file():
             emit_error(f"Archivo de modelo NO EXISTE o es un directorio: {model_path}")

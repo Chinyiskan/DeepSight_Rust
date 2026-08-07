@@ -494,6 +494,23 @@ fn clear_trained_model(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn copy_best_pt(from: String, to: String) -> Result<(), String> {
+    let src = PathBuf::from(&from);
+    let dst = PathBuf::from(&to);
+    if !src.exists() {
+        return Err(format!("Archivo origen no existe: {}", from));
+    }
+    if let Some(parent) = dst.parent() {
+        if !parent.as_os_str().is_empty() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
+    std::fs::copy(&src, &dst)
+        .map(|_| ())
+        .map_err(|e| format!("No se pudo copiar: {}", e))
+}
+
 fn main() {
     let startup_root = resolve_project_root()
         .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
@@ -555,23 +572,6 @@ fn main() {
             eprintln!("DeepSight - Error fatal al iniciar: {}", e);
             std::process::exit(1);
         });
-}
-
-#[tauri::command]
-fn copy_best_pt(from: String, to: String) -> Result<(), String> {
-    let src = PathBuf::from(&from);
-    let dst = PathBuf::from(&to);
-    if !src.exists() {
-        return Err(format!("Archivo origen no existe: {}", from));
-    }
-    if let Some(parent) = dst.parent() {
-        if !parent.as_os_str().is_empty() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-    }
-    std::fs::copy(&src, &dst)
-        .map(|_| ())
-        .map_err(|e| format!("No se pudo copiar: {}", e))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

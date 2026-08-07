@@ -278,17 +278,51 @@ fn prepare_temp_dataset_sync(
         })?;
         class_dir_order.push(class_name.clone());
 
+        let total_in_class = file_paths.len();
+        let mut skipped_count: usize = 0;
+
         for (file_idx, src_path_str) in file_paths.iter().enumerate() {
             let src_path = Path::new(src_path_str);
+
+            // Validación: existencia
             if !src_path.exists() {
+                skipped_count += 1;
                 if let Some(sender) = tx {
                     let _ = sender.send(ProcessOutput {
                         line_type: "log".to_string(),
                         content: serde_json::json!({
                             "level": "warning",
-                            "message": format!("Archivo no encontrado, saltando: {}", src_path.display())
+                            "message": format!(
+                                "[COPY-SKIP] Clase '{}': archivo '{}' no existe en disco. \
+                                 Acción: ignorado. ({} de {} archivos en esta clase)",
+                                class_name,
+                                src_path.display(),
+                                skipped_count,
+                                total_in_class
+                            )
                         }),
                         raw: format!("[WARN] No existe: {}", src_path.display()),
+                    });
+                }
+                continue;
+            }
+
+            // Validación: que sea archivo, no directorio
+            if !src_path.is_file() {
+                skipped_count += 1;
+                if let Some(sender) = tx {
+                    let _ = sender.send(ProcessOutput {
+                        line_type: "log".to_string(),
+                        content: serde_json::json!({
+                            "level": "warning",
+                            "message": format!(
+                                "[COPY-SKIP] Clase '{}': '{}' no es un archivo regular (puede ser directorio). \
+                                 Acción: ignorado.",
+                                class_name,
+                                src_path.display()
+                            )
+                        }),
+                        raw: format!("[WARN] No es archivo: {}", src_path.display()),
                     });
                 }
                 continue;
@@ -321,7 +355,9 @@ fn prepare_temp_dataset_sync(
             if src_path.is_file() {
                 std::fs::copy(src_path, &dest_path).with_context(|| {
                     format!(
-                        "Error copiando: {} -> {}",
+                        "[COPY-ERR] Clase '{}': error copiando '{}' → '{}'. \
+                         Verifica permisos y espacio disponible.",
+                        class_name,
                         src_path.display(),
                         dest_path.display()
                     )
@@ -598,6 +634,63 @@ pub async fn run_inference(
     }
 
     let classes_arg = join_class_names_for_arg(&class_names);
+
+    // ── PATH-DIAG: Registro diagnóstico de rutas antes de enviar a Python ──────
+    // Este bloque NO modifica ningún comportamiento. Solo observa y registra
+    // el estado exacto de las rutas en el lado Rust para comparar con lo que
+    // Python recibe. Si el error de suffix ocurre, los logs aquí permitirán
+    // identificar exactamente dónde se corrompe la ruta.
+    {
+        let model_lossy = model_path.to_string_lossy();
+        let image_lossy = image_path.to_string_lossy();
+        let model_canon = std::fs::canonicalize(&model_path)
+            .map(|p| format!("{:?}", p))
+            .unwrap_or_else(|e| format!("Err({})", e));
+        let image_canon = std::fs::canonicalize(&image_path)
+            .map(|p| format!("{:?}", p))
+            .unwrap_or_else(|e| format!("Err({})", e));
+
+        eprintln!("[PATH-DIAG] === model_path ===");
+        eprintln!("[PATH-DIAG] raw PathBuf {{:?}}    : {:?}", model_path);
+        eprintln!("[PATH-DIAG] display               : {}", model_path.display());
+        eprintln!("[PATH-DIAG] to_string_lossy       : {}", model_lossy);
+        eprintln!("[PATH-DIAG] exists()              : {}", model_path.exists());
+        eprintln!("[PATH-DIAG] is_file()             : {}", model_path.is_file());
+        eprintln!(
+            "[PATH-DIAG] extension()           : {:?}",
+            model_path.extension().and_then(|e| e.to_str())
+        );
+        eprintln!("[PATH-DIAG] canonicalize()        : {}", model_canon);
+        eprintln!("[PATH-DIAG] has_root()            : {}", model_path.has_root());
+        eprintln!("[PATH-DIAG] is_absolute()         : {}", model_path.is_absolute());
+
+        eprintln!("[PATH-DIAG] === image_path ===");
+        eprintln!("[PATH-DIAG] raw PathBuf {{:?}}    : {:?}", image_path);
+        eprintln!("[PATH-DIAG] display               : {}", image_path.display());
+        eprintln!("[PATH-DIAG] to_string_lossy       : {}", image_lossy);
+        eprintln!("[PATH-DIAG] exists()              : {}", image_path.exists());
+        eprintln!("[PATH-DIAG] is_file()             : {}", image_path.is_file());
+        eprintln!(
+            "[PATH-DIAG] extension()           : {:?}",
+            image_path.extension().and_then(|e| e.to_str())
+        );
+        eprintln!("[PATH-DIAG] canonicalize()        : {}", image_canon);
+
+        // Detectar posibles problemas antes de que Python los vea
+        if model_lossy.ends_with('/') || model_lossy.ends_with('\\') {
+            eprintln!("[PATH-DIAG] ⚠ ALERTA: model_path termina con separador de directorio");
+        }
+        if model_lossy.starts_with(r"\\?\") {
+            eprintln!("[PATH-DIAG] ⚠ ALERTA: model_path tiene prefijo UNC \\\\?\\");
+        }
+        if model_lossy.contains('\u{FFFD}') {
+            eprintln!("[PATH-DIAG] ⚠ ALERTA: model_path contiene U+FFFD (reemplazo lossy UTF-8)");
+        }
+        if image_lossy.ends_with('/') || image_lossy.ends_with('\\') {
+            eprintln!("[PATH-DIAG] ⚠ ALERTA: image_path termina con separador de directorio");
+        }
+    }
+    // ── FIN PATH-DIAG ─────────────────────────────────────────────────────────
 
     let mut cmd = TokioCommand::new(&python_cmd);
     cmd.arg(&infer_script)
